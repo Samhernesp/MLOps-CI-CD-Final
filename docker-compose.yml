@@ -1,0 +1,8 @@
+version: '3.11'
+
+services:
+  salary_prediction:
+    image: salary_prediction_image
+    build: .
+    ports:
+      - "8000:8000"
