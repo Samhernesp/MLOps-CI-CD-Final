@@ -49,13 +49,14 @@ jobs:
     needs: setup
     
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download model
         uses: actions/download-artifact@v4
         with:
           name: model
           path: local_model
 
-      - uses: actions/checkout@v4
       
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
