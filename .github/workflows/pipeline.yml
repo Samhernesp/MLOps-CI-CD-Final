@@ -6,65 +6,109 @@ on:
       - dev
       - prod
 
+permissions:
+  id-token: write   # Required for GitHub OIDC
+  contents: read    # Required for checkout
+
 jobs:
+  setup:
+    name: Setup (Download Model)
+    runs-on: ubuntu-latest
+    outputs:
+      model-ready: ${{ steps.download-model.outputs.success }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::312347353460:role/github.to.aws.oicd
+          aws-region: us-east-2
+
+      - name: Download ONNX model
+        id: download-model
+        run: | # el directorio de local model debe existir
+          if aws s3 cp s3://mlops-final-bucket/models/predictor_model.onnx ./local_model/predictor_model.onnx; then
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "XXXXXXXX Failed to download model XXXXXXXXX"
+            exit 1
+          fi
+
+      - name: Upload model to workspace
+        uses: actions/upload-artifact@v4
+        with:
+          name: model
+          path: local_model/predictor_model.onnx
+
   test-api:
     name: Run API Tests
     runs-on: ubuntu-latest
-
+    needs: setup
+    
     steps:
-      - name: Checkout repository code
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.1
-        uses: actions/setup-python@v5
+      - name: Download model
+        uses: actions/download-artifact@v4
         with:
-          python-version: '3.11'
+          name: model
+          path: local_model
 
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run API tests with pytest
-        run: pytest tests/test_api.py
-
-  test-model-metrics:
-    name: Run Model Metric Tests
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository code
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
+      
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/test_api.py
+
+  test-model-metrics:
+    name: Run Model Tests
+    runs-on: ubuntu-latest
+    needs: setup
+    
+    steps:
+      - name: Download model
+        uses: actions/download-artifact@v4
+        with:
+          name: model
+          path: local_model
+
+      - uses: actions/checkout@v4
       
-      - name: Run Model Metric tests with pytest
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run tests
         run: pytest tests/test_metrics.py
 
   build-docker:
     name: Build Docker Image
     runs-on: ubuntu-latest
-
-    needs: [test-api, test-model-metrics] 
-
+    needs: [test-api, test-model-metrics]
+    
     steps:
-      - name: Checkout repository code
-        uses: actions/checkout@v4
+      - name: Download model
+        uses: actions/download-artifact@v4
+        with:
+          name: model
+          path: local_model
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v4
 
-      - name: Build the Docker image
+      - name: Build Docker image
         run: |
           docker build -t salary-predictor-app:latest .
-      
-      - name: List Docker images
-        run: docker images
