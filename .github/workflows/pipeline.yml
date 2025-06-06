@@ -6,6 +6,12 @@ on:
       - dev
       - prod
 
+env:
+  AWS_REGION: us-east-2
+  ECR_REPOSITORY: salary-predictor-app
+  EC2_INSTANCE_IP: 3.144.132.38  
+  SSH_USER: ec2-user  
+
 permissions:
   id-token: write   # Required for GitHub OIDC
   contents: read    # Required for checkout
@@ -97,21 +103,63 @@ jobs:
       - name: Run tests
         run: pytest tests/test_metrics.py
 
-  build-docker:
-    name: Build Docker Image
+  build-and-deploy:
+    name: Build and Deploy to EC2
     runs-on: ubuntu-latest
     needs: [test-api, test-model-metrics]
     
     steps:
       - uses: actions/checkout@v4
-
       - name: Download model
         uses: actions/download-artifact@v4
         with:
           name: model
           path: local_model
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::312347353460:role/github.to.aws.oicd
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Build Docker image
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t salary-predictor-app:latest .
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Add EC2 to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" >> ~/.ssh/ec2_key.pem
+          chmod 600 ~/.ssh/ec2_key.pem
+          ssh-keyscan ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to EC2 via SSH
+        run: |
+          ssh -i ~/.ssh/ec2_key.pem ${{ env.SSH_USER }}@${{ env.EC2_INSTANCE_IP }} << 'EOF'
+          # Stop and remove old container (if running)
+          docker stop salary-predictor || true
+          docker rm salary-predictor || true
+
+          # Login to ECR (on EC2)
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login \
+            --username AWS \
+            --password-stdin ${{ steps.login-ecr.outputs.registry }}
+
+          # Pull and run new image
+          docker pull ${{ steps.build-image.outputs.image }}
+          docker run -d \
+            --name salary-predictor \
+            -p 80:8000 \  # Map EC2 port 80 → container port 8000 (FastAPI)
+            --restart unless-stopped \
+            ${{ steps.build-image.outputs.image }}
+          EOF
