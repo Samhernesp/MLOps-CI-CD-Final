@@ -110,6 +110,7 @@ jobs:
     
     steps:
       - uses: actions/checkout@v4
+
       - name: Download model
         uses: actions/download-artifact@v4
         with:
@@ -136,16 +137,27 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Add EC2 to known hosts
+      - name: Setup SSH Key
         run: |
+          # Create .ssh directory with correct permissions
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" >> ~/.ssh/ec2_key.pem
+          chmod 700 ~/.ssh
+          
+          # Write the key with proper formatting
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key.pem
           chmod 600 ~/.ssh/ec2_key.pem
+          
+          # Verify key is properly formatted
+          head -n 1 ~/.ssh/ec2_key.pem | grep -q '-----BEGIN RSA PRIVATE KEY-----' || exit 1
+          tail -n 1 ~/.ssh/ec2_key.pem | grep -q '-----END RSA PRIVATE KEY-----' || exit 1
+          
+          # Add EC2 to known hosts
           ssh-keyscan ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
 
       - name: Deploy to EC2 via SSH
         run: |
-          ssh -i ~/.ssh/ec2_key.pem ${{ env.SSH_USER }}@${{ env.EC2_INSTANCE_IP }} << 'EOF'
+          ssh -v -o StrictHostKeyChecking=no -i ~/.ssh/ec2_key.pem ${{ env.SSH_USER }}@${{ env.EC2_INSTANCE_IP }} << 'EOF'
           # Stop and remove old container (if running)
           docker stop salary-predictor || true
           docker rm salary-predictor || true
@@ -159,7 +171,7 @@ jobs:
           docker pull ${{ steps.build-image.outputs.image }}
           docker run -d \
             --name salary-predictor \
-            -p 80:8000 \  # Map EC2 port 80 → container port 8000 (FastAPI)
+            -p 80:8000 \
             --restart unless-stopped \
             ${{ steps.build-image.outputs.image }}
           EOF
