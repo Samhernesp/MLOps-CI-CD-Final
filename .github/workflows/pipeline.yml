@@ -10,7 +10,7 @@ env:
   AWS_REGION: us-east-2
   ECR_REPOSITORY: salary-predictor-app
   EC2_INSTANCE_IP: 3.144.132.38  
-  SSH_USER: ec2-user  
+  EC2_INSTANCE_ID: i-00ba0ef9f8ebd688a
 
 permissions:
   id-token: write   # Required for GitHub OIDC
@@ -104,15 +104,13 @@ jobs:
         run: pytest tests/test_metrics.py
 
   build-and-deploy:
-    name: Build and Deploy to EC2
+    name: Build and Deploy (SSM)
     runs-on: ubuntu-latest
     needs: [test-api, test-model-metrics]
     
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download model
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: model
           path: local_model
@@ -137,37 +135,32 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Setup SSH Key
+      - name: Deploy to EC2 via SSM
         run: |
-          # Create .ssh directory with correct permissions
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
+          # Send command and capture ID
+          command_id=$(aws ssm send-command \
+            --instance-ids "${{ env.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands="[
+              \"aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}\",
+              \"docker stop salary-predictor || true\",
+              \"docker rm salary-predictor || true\",
+              \"docker pull ${{ steps.build-image.outputs.image }}\",
+              \"docker run -d --name salary-predictor -p 80:8000 --restart unless-stopped ${{ steps.build-image.outputs.image }}\"
+            ]" \
+            --query 'Command.CommandId' \
+            --output text)
           
-          # Write the key with proper formatting
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key.pem
-          chmod 600 ~/.ssh/ec2_key.pem
+          # Wait for command completion
+          echo "Waiting for command to complete..."
+          aws ssm wait command-executed \
+            --command-id "$command_id" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}"
           
-          # Add EC2 to known hosts
-          ssh-keyscan ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-
-      - name: Deploy to EC2 via SSH
-        run: |
-          ssh -v -o StrictHostKeyChecking=no -i ~/.ssh/ec2_key.pem ${{ env.SSH_USER }}@${{ env.EC2_INSTANCE_IP }} << 'EOF'
-          # Stop and remove old container (if running)
-          docker stop salary-predictor || true
-          docker rm salary-predictor || true
-
-          # Login to ECR (on EC2)
-          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login \
-            --username AWS \
-            --password-stdin ${{ steps.login-ecr.outputs.registry }}
-
-          # Pull and run new image
-          docker pull ${{ steps.build-image.outputs.image }}
-          docker run -d \
-            --name salary-predictor \
-            -p 80:8000 \
-            --restart unless-stopped \
-            ${{ steps.build-image.outputs.image }}
-          EOF
+          # Get command output
+          echo "Command output:"
+          aws ssm get-command-invocation \
+            --command-id "$command_id" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}"
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
