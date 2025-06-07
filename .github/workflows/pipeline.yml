@@ -147,10 +147,6 @@ jobs:
           echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key.pem
           chmod 600 ~/.ssh/ec2_key.pem
           
-          # Verify key is properly formatted
-          head -n 1 ~/.ssh/ec2_key.pem | grep -q '-----BEGIN RSA PRIVATE KEY-----' || exit 1
-          tail -n 1 ~/.ssh/ec2_key.pem | grep -q '-----END RSA PRIVATE KEY-----' || exit 1
-          
           # Add EC2 to known hosts
           ssh-keyscan ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
