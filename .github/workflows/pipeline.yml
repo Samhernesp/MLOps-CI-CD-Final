@@ -6,7 +6,6 @@ on:
       - dev
       - prod
 
-
 env:
   DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
   EC2_INSTANCE_IP: ${{ secrets.EC2_IP }}
@@ -22,6 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       model-ready: ${{ steps.download-model.outputs.success }}
+      csv-ready: ${{ steps.download-csv.outputs.success }}
     
     steps:
       - name: Checkout code
@@ -49,6 +49,24 @@ jobs:
           name: model
           path: local_model/predictor_model.onnx
 
+      - name: Download CSV data
+        id: download-csv
+        run: | 
+          mkdir -p data
+          if aws s3 cp s3://mlops-final-bucket/data/Salary_dataset.csv ./data/Salary_dataset.csv; then
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "XXXXXXXX Failed to download CSV XXXXXXXXX"
+            exit 1
+          fi
+
+      - name: Upload CSV as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Salary_dataset
+          path: data/Salary_dataset.csv
+
+
   test-api:
     name: Run API Tests
     runs-on: ubuntu-latest
@@ -63,7 +81,12 @@ jobs:
           name: model
           path: local_model
 
-      
+      - name: Download dataset
+        uses: actions/download-artifact@v4
+        with:
+          name: Salary_dataset
+          path: data
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -75,6 +98,7 @@ jobs:
 
       - name: Run tests
         run: pytest tests/test_api.py
+
 
   test-model-metrics:
     name: Run Model Tests
@@ -90,6 +114,11 @@ jobs:
           name: model
           path: local_model
 
+      - name: Download dataset
+        uses: actions/download-artifact@v4
+        with:
+          name: Salary_dataset
+          path: data
       
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -102,6 +131,7 @@ jobs:
 
       - name: Run tests
         run: pytest tests/test_metrics.py
+
 
   build-and-push:
     name: Build and Push to Docker Hub
@@ -129,6 +159,7 @@ jobs:
           # Also tag as latest
           docker tag $DOCKERHUB_USERNAME/salary-predictor-app:$GITHUB_SHA $DOCKERHUB_USERNAME/salary-predictor-app:latest
           docker push $DOCKERHUB_USERNAME/salary-predictor-app:latest
+
 
   deploy:
     name: Deploy to Ubuntu EC2
