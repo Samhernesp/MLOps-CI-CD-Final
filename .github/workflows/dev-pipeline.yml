@@ -1,0 +1,191 @@
+name: CI - Test and Build
+
+on:
+  push:
+    branches:
+      - dev
+
+env:
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  EC2_INSTANCE_IP: ${{ secrets.EC2_IP }}
+  SSH_USERNAME: ubuntu                  
+
+permissions:
+  id-token: write   # Required for GitHub OIDC
+  contents: read    # Required for checkout
+
+jobs:
+  setup:
+    name: Setup (Download Model)
+    runs-on: ubuntu-latest
+    outputs:
+      model-ready: ${{ steps.download-model.outputs.success }}
+      csv-ready: ${{ steps.download-csv.outputs.success }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::312347353460:role/github.to.aws.oicd
+          aws-region: us-east-2
+
+      - name: Download ONNX model
+        id: download-model
+        run: | 
+          if aws s3 cp s3://mlops-final-bucket/models/predictor_model.onnx ./local_model/predictor_model.onnx; then
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "XXXXXXXX Failed to download model XXXXXXXXX"
+            exit 1
+          fi
+
+      - name: Upload model to workspace
+        uses: actions/upload-artifact@v4
+        with:
+          name: model
+          path: local_model/predictor_model.onnx
+
+      - name: Download CSV data
+        id: download-csv
+        run: | 
+          mkdir -p data
+          if aws s3 cp s3://mlops-final-bucket/data/Salary_dataset.csv ./data/Salary_dataset.csv; then
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "XXXXXXXX Failed to download CSV XXXXXXXXX"
+            exit 1
+          fi
+
+      - name: Upload CSV as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Salary_dataset
+          path: data/Salary_dataset.csv
+
+
+  test-api:
+    name: Run API Tests
+    runs-on: ubuntu-latest
+    needs: setup
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download model
+        uses: actions/download-artifact@v4
+        with:
+          name: model
+          path: local_model
+
+      - name: Download dataset
+        uses: actions/download-artifact@v4
+        with:
+          name: Salary_dataset
+          path: data
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/test_api.py
+
+
+  test-model-metrics:
+    name: Run Model Tests
+    runs-on: ubuntu-latest
+    needs: setup
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download model
+        uses: actions/download-artifact@v4
+        with:
+          name: model
+          path: local_model
+
+      - name: Download dataset
+        uses: actions/download-artifact@v4
+        with:
+          name: Salary_dataset
+          path: data
+      
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/test_metrics.py
+
+
+  build-and-push:
+    name: Build and Push to Docker Hub
+    runs-on: ubuntu-latest
+    environment: env
+    needs: [test-api, test-model-metrics]
+    
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: model
+          path: local_model
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t $DOCKERHUB_USERNAME/salary-predictor-app:$GITHUB_SHA .
+          docker push $DOCKERHUB_USERNAME/salary-predictor-app:$GITHUB_SHA
+          # Also tag as latest
+          docker tag $DOCKERHUB_USERNAME/salary-predictor-app:$GITHUB_SHA $DOCKERHUB_USERNAME/salary-predictor-app:latest
+          docker push $DOCKERHUB_USERNAME/salary-predictor-app:latest
+
+
+  deploy:
+    name: Deploy to Ubuntu EC2
+    runs-on: ubuntu-latest
+    environment: env
+    needs: build-and-push
+    
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ env.EC2_INSTANCE_IP }}
+          username: ${{ env.SSH_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Login to Docker Hub
+            echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+            
+            # Stop/remove old container
+            docker stop salary-predictor || true
+            docker rm salary-predictor || true
+            
+            # Pull and run new image
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/salary-predictor-app:latest
+            docker run -d \
+              --name salary-predictor \
+              -p 80:8000 \
+              --restart unless-stopped \
+              ${{ secrets.DOCKERHUB_USERNAME }}/salary-predictor-app:latest
+
