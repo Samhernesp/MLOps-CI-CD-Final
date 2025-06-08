@@ -1,9 +1,8 @@
-name: CI - Test and Build
+name: CI - Test and Build - prod
 
 on:
   push:
     branches:
-      - dev
       - prod
 
 env:
@@ -154,11 +153,11 @@ jobs:
 
       - name: Build and push Docker image
         run: |
-          docker build -t $DOCKERHUB_USERNAME/salary-predictor-app:$GITHUB_SHA .
-          docker push $DOCKERHUB_USERNAME/salary-predictor-app:$GITHUB_SHA
+          docker build -t $DOCKERHUB_USERNAME/salary-predictor-app-prod:$GITHUB_SHA .
+          docker push $DOCKERHUB_USERNAME/salary-predictor-app-prod:$GITHUB_SHA
           # Also tag as latest
-          docker tag $DOCKERHUB_USERNAME/salary-predictor-app:$GITHUB_SHA $DOCKERHUB_USERNAME/salary-predictor-app:latest
-          docker push $DOCKERHUB_USERNAME/salary-predictor-app:latest
+          docker tag $DOCKERHUB_USERNAME/salary-predictor-app-prod:$GITHUB_SHA $DOCKERHUB_USERNAME/salary-predictor-app-prod:latest
+          docker push $DOCKERHUB_USERNAME/salary-predictor-app-prod:latest
 
 
   deploy:
@@ -179,14 +178,14 @@ jobs:
             echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
             
             # Stop/remove old container
-            docker stop salary-predictor || true
-            docker rm salary-predictor || true
+            docker stop salary-predictor-pod || true
+            docker rm salary-predictor-prod || true
             
             # Pull and run new image
-            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/salary-predictor-app:latest
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/salary-predictor-app-prod:latest
             docker run -d \
-              --name salary-predictor \
+              --name salary-predictor-prod \
               -p 80:8000 \
               --restart unless-stopped \
-              ${{ secrets.DOCKERHUB_USERNAME }}/salary-predictor-app:latest
+              ${{ secrets.DOCKERHUB_USERNAME }}/salary-predictor-app-prod:latest
 
